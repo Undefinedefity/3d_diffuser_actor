@@ -30,3 +30,5 @@ calvin/
 data/
 
 output.log
+RLBench/
+models/
