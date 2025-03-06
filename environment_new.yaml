@@ -1,3 +1,5 @@
+# Differs from original env, adapting my linux pc
+
 name: 3d_diffuser_actor_new
 channels:
   - pytorch
