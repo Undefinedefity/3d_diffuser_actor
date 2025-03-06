@@ -1,4 +1,4 @@
-"""Main script for trajectory optimization."""
+"""轨迹优化的主脚本."""
 
 import io
 import os
@@ -24,30 +24,34 @@ from utils.common_utils import (
 
 
 class Arguments(tap.Tap):
-    cameras: Tuple[str, ...] = ("wrist", "left_shoulder", "right_shoulder")
-    image_size: str = "256,256"
-    max_episodes_per_task: int = 100
-    instructions: Optional[Path] = "instructions.pkl"
-    seed: int = 0
-    tasks: Tuple[str, ...]
-    variations: Tuple[int, ...] = (0,)
-    checkpoint: Optional[Path] = None
-    accumulate_grad_batches: int = 1
-    val_freq: int = 500
-    gripper_loc_bounds: Optional[str] = None
-    gripper_loc_bounds_buffer: float = 0.04
-    eval_only: int = 0
+    """命令行参数配置类"""
+    # 相机配置
+    cameras: Tuple[str, ...] = ("wrist", "left_shoulder", "right_shoulder")  # 使用的相机视角
+    image_size: str = "256,256"  # 图像尺寸
+    max_episodes_per_task: int = 100  # 每个任务的最大训练回合数
+    instructions: Optional[Path] = "instructions.pkl"  # 任务指令文件路径
+    seed: int = 0  # 随机种子
+    tasks: Tuple[str, ...]  # 要训练的任务列表
+    variations: Tuple[int, ...] = (0,)  # 任务变体
+    checkpoint: Optional[Path] = None  # 模型检查点路径
+    
+    # 训练相关参数
+    accumulate_grad_batches: int = 1  # 梯度累积的批次数
+    val_freq: int = 500  # 验证频率
+    gripper_loc_bounds: Optional[str] = None  # 机械臂夹持器位置边界
+    gripper_loc_bounds_buffer: float = 0.04  # 夹持器边界缓冲区
+    eval_only: int = 0  # 是否仅进行评估
 
-    # Training and validation datasets
-    dataset: Path
-    valset: Path
-    dense_interpolation: int = 0
-    interpolation_length: int = 100
+    # 数据集配置
+    dataset: Path  # 训练数据集路径
+    valset: Path  # 验证数据集路径
+    dense_interpolation: int = 0  # 是否使用密集插值
+    interpolation_length: int = 100  # 插值长度
 
-    # Logging to base_log_dir/exp_log_dir/run_log_dir
-    base_log_dir: Path = Path(__file__).parent / "train_logs"
-    exp_log_dir: str = "exp"
-    run_log_dir: str = "run"
+    # 日志配置
+    base_log_dir: Path = Path(__file__).parent / "train_logs"  # 基础日志目录
+    exp_log_dir: str = "exp"  # 实验日志目录
+    run_log_dir: str = "run"  # 运行日志目录
 
     # Main training parameters
     num_workers: int = 1
@@ -66,7 +70,8 @@ class Arguments(tap.Tap):
 
     # Model
     backbone: str = "clip"  # one of "resnet", "clip"
-    embedding_dim: int = 120
+    # File "/home/def/Work/3d_diffuser_actor/diffuser_actor/utils/multihead_custom_attention.py", line 49
+    embedding_dim: int = 120 # embed_dim must be divisible by num_heads
     num_vis_ins_attn_layers: int = 2
     use_instruction: int = 0
     rotation_parametrization: str = 'quat'
@@ -80,15 +85,15 @@ class Arguments(tap.Tap):
 
 
 class TrainTester(BaseTrainTester):
-    """Train/test a trajectory optimization algorithm."""
+    """训练/测试轨迹优化算法的类"""
 
     def __init__(self, args):
         """Initialize."""
         super().__init__(args)
 
     def get_datasets(self):
-        """Initialize datasets."""
-        # Load instruction, based on which we load tasks/variations
+        """初始化数据集"""
+        # 根据指令加载任务和变体
         instruction = load_instructions(
             self.args.instructions,
             tasks=self.args.tasks,
@@ -103,7 +108,7 @@ class TrainTester(BaseTrainTester):
                 for var in var_instr.keys()
             ]
 
-        # Initialize datasets with arguments
+        # 初始化训练和测试数据集
         train_dataset = RLBenchDataset(
             root=self.args.dataset,
             instructions=instruction,
@@ -166,10 +171,20 @@ class TrainTester(BaseTrainTester):
         return TrajectoryCriterion()
 
     def train_one_step(self, model, criterion, optimizer, step_id, sample):
-        """Run a single training step."""
+        """执行单步训练
+        
+        Args:
+            model: 模型
+            criterion: 损失函数
+            optimizer: 优化器
+            step_id: 当前步数
+            sample: 训练样本
+        """
+        # 梯度清零
         if step_id % self.args.accumulate_grad_batches == 0:
             optimizer.zero_grad()
 
+        # 处理关键点轨迹
         if self.args.keypose_only:
             sample["trajectory"] = sample["trajectory"][:, [-1]]
             sample["trajectory_mask"] = sample["trajectory_mask"][:, [-1]]
@@ -177,7 +192,7 @@ class TrainTester(BaseTrainTester):
             sample["trajectory"] = sample["trajectory"][:, 1:]
             sample["trajectory_mask"] = sample["trajectory_mask"][:, 1:]
 
-        # Forward pass
+        # 前向传播
         curr_gripper = (
             sample["curr_gripper"] if self.args.num_history < 1
             else sample["curr_gripper_history"][:, -self.args.num_history:]
@@ -191,15 +206,15 @@ class TrainTester(BaseTrainTester):
             curr_gripper
         )
 
-        # Backward pass
+        # 反向传播
         loss = criterion.compute_loss(out)
         loss.backward()
 
-        # Update
+        # 更新模型参数
         if step_id % self.args.accumulate_grad_batches == self.args.accumulate_grad_batches - 1:
             optimizer.step()
 
-        # Log
+        # 记录日志
         if dist.get_rank() == 0 and (step_id + 1) % self.args.val_freq == 0:
             self.writer.add_scalar("lr", self.args.lr, step_id)
             self.writer.add_scalar("train-loss/noise_mse", loss, step_id)
@@ -207,7 +222,16 @@ class TrainTester(BaseTrainTester):
     @torch.no_grad()
     def evaluate_nsteps(self, model, criterion, loader, step_id, val_iters,
                         split='val'):
-        """Run a given number of evaluation steps."""
+        """执行指定步数的评估
+        
+        Args:
+            model: 模型
+            criterion: 损失函数
+            loader: 数据加载器
+            step_id: 当前步数
+            val_iters: 评估迭代次数
+            split: 数据集划分,默认为'val'
+        """
         if self.args.val_iters != -1:
             val_iters = self.args.val_iters
         values = {}
@@ -218,6 +242,7 @@ class TrainTester(BaseTrainTester):
             if i == val_iters:
                 break
 
+            # 处理关键点轨迹
             if self.args.keypose_only:
                 sample["trajectory"] = sample["trajectory"][:, [-1]]
                 sample["trajectory_mask"] = sample["trajectory_mask"][:, [-1]]
@@ -225,10 +250,13 @@ class TrainTester(BaseTrainTester):
                 sample["trajectory"] = sample["trajectory"][:, 1:]
                 sample["trajectory_mask"] = sample["trajectory_mask"][:, 1:]
 
+            # 获取当前夹爪状态
             curr_gripper = (
                 sample["curr_gripper"] if self.args.num_history < 1
                 else sample["curr_gripper_history"][:, -self.args.num_history:]
             )
+            
+            # 模型推理
             action = model(
                 sample["trajectory"].to(device),
                 sample["trajectory_mask"].to(device),
@@ -238,20 +266,22 @@ class TrainTester(BaseTrainTester):
                 curr_gripper.to(device),
                 run_inference=True
             )
+            
+            # 计算评估指标
             losses, losses_B = criterion.compute_metrics(
                 action,
                 sample["trajectory"].to(device),
                 sample["trajectory_mask"].to(device)
             )
 
-            # Gather global statistics
+            # 收集全局统计信息
             for n, l in losses.items():
                 key = f"{split}-losses/mean/{n}"
                 if key not in values:
                     values[key] = torch.Tensor([]).to(device)
                 values[key] = torch.cat([values[key], l.unsqueeze(0)])
 
-            # Gather per-task statistics
+            # 收集每个任务的统计信息
             tasks = np.array(sample["task"])
             for n, l in losses_B.items():
                 for task in np.unique(tasks):
@@ -261,7 +291,7 @@ class TrainTester(BaseTrainTester):
                         values[key] = torch.Tensor([]).to(device)
                     values[key] = torch.cat([values[key], l_task.unsqueeze(0)])
 
-            # Generate visualizations
+            # 生成可视化结果
             if i == 0 and dist.get_rank() == 0 and step_id > -1:
                 viz_key = f'{split}-viz/viz'
                 viz = generate_visualizations(
@@ -271,7 +301,7 @@ class TrainTester(BaseTrainTester):
                 )
                 self.writer.add_image(viz_key, viz, step_id)
 
-        # Log all statistics
+        # 记录所有统计信息
         values = self.synchronize_between_processes(values)
         values = {k: v.mean().item() for k, v in values.items()}
         if dist.get_rank() == 0:
@@ -279,7 +309,7 @@ class TrainTester(BaseTrainTester):
                 for key, val in values.items():
                     self.writer.add_scalar(key, val, step_id)
 
-            # Also log to terminal
+            # 在终端打印结果
             print(f"Step {step_id}:")
             for key, value in values.items():
                 print(f"{key}: {value:.03f}")
@@ -288,6 +318,7 @@ class TrainTester(BaseTrainTester):
 
 
 def traj_collate_fn(batch):
+    """轨迹数据的批处理函数"""
     keys = [
         "trajectory", "trajectory_mask",
         "rgbs", "pcds",
@@ -307,11 +338,20 @@ def traj_collate_fn(batch):
 
 
 class TrajectoryCriterion:
+    """轨迹损失函数类"""
 
     def __init__(self):
         pass
 
     def compute_loss(self, pred, gt=None, mask=None, is_loss=True):
+        """计算损失值
+        
+        Args:
+            pred: 预测值
+            gt: 真实值
+            mask: 掩码
+            is_loss: 是否计算损失,默认为True
+        """
         if not is_loss:
             assert gt is not None and mask is not None
             return self.compute_metrics(pred, gt, mask)[0]['action_mse']
@@ -319,7 +359,14 @@ class TrajectoryCriterion:
 
     @staticmethod
     def compute_metrics(pred, gt, mask):
-        # pred/gt are (B, L, 7), mask (B, L)
+        """计算评估指标
+        
+        Args:
+            pred: 预测轨迹,(B,L,7)
+            gt: 真实轨迹,(B,L,7)
+            mask: 掩码,(B,L)
+        """
+        # 计算位置误差
         pos_l2 = ((pred[..., :3] - gt[..., :3]) ** 2).sum(-1).sqrt()
         # symmetric quaternion eval
         quat_l1 = (pred[..., 3:7] - gt[..., 3:7]).abs().sum(-1)
@@ -368,6 +415,12 @@ class TrajectoryCriterion:
 
 
 def fig_to_numpy(fig, dpi=60):
+    """将matplotlib图像转换为numpy数组
+    
+    Args:
+        fig: matplotlib图像
+        dpi: 分辨率,默认60
+    """
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=dpi)
     buf.seek(0)
@@ -378,6 +431,14 @@ def fig_to_numpy(fig, dpi=60):
 
 
 def generate_visualizations(pred, gt, mask, box_size=0.3):
+    """生成轨迹可视化结果
+    
+    Args:
+        pred: 预测轨迹
+        gt: 真实轨迹
+        mask: 掩码
+        box_size: 显示框大小,默认0.3
+    """
     batch_idx = 0
     pred = pred[batch_idx].detach().cpu().numpy()
     gt = gt[batch_idx].detach().cpu().numpy()

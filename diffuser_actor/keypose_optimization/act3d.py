@@ -18,6 +18,19 @@ from diffuser_actor.utils.clip import load_clip
 
 
 class Act3D(nn.Module):
+    """Act3D基线模型实现
+    
+    论文2节相关工作:
+    Act3D是一个确定性3D策略模型,使用3D场景表示但不使用扩散目标。
+    本文将其作为重要基线进行对比。
+    
+    主要区别:
+    1. Act3D使用分类和回归目标,而不是扩散
+    2. Act3D预测单个关键姿态,而不是轨迹
+    3. Act3D使用ghost points进行3D动作预测
+    
+    实验结果显示3D Diffuser Actor在RLBench上显著优于Act3D。
+    """
 
     def __init__(self,
                  backbone="clip",

@@ -12,6 +12,20 @@ from .clip import load_clip
 
 
 class Encoder(nn.Module):
+    """3D场景编码器
+    
+    论文3.2节描述:
+    1. 使用CLIP ResNet50提取每个视角的2D特征
+    2. 使用深度图将2D特征投影到3D空间
+    3. 使用FPS采样减少token数量
+    4. 使用相对位置3D注意力融合多视角信息
+    
+    主要功能:
+    - 多视角RGB-D编码
+    - 2D到3D特征投影
+    - 视觉-语言跨模态融合
+    - 机器人状态编码
+    """
 
     def __init__(self,
                  backbone="clip",
@@ -92,15 +106,20 @@ class Encoder(nn.Module):
         return None
 
     def encode_curr_gripper(self, curr_gripper, context_feats, context):
-        """
-        Compute current gripper position features and positional embeddings.
-
+        """编码机器人当前状态
+        
+        论文3.2节:
+        将机器人状态编码为特征向量,并使用相对位置注意力
+        与场景特征进行融合
+        
         Args:
-            - curr_gripper: (B, nhist, 3+)
-
+            curr_gripper: (B,nhist,3+) 机器人历史状态
+            context_feats: (B,N,F) 场景特征
+            context: (B,N,3) 场景3D坐标
+            
         Returns:
-            - curr_gripper_feats: (B, nhist, F)
-            - curr_gripper_pos: (B, nhist, F, 2)
+            curr_gripper_feats: (B,nhist,F) 状态特征
+            curr_gripper_pos: (B,nhist,F,2) 位置编码
         """
         return self._encode_gripper(curr_gripper, self.curr_gripper_embed,
                                     context_feats, context)
@@ -161,16 +180,19 @@ class Encoder(nn.Module):
         return gripper_feats, gripper_pos
 
     def encode_images(self, rgb, pcd):
-        """
-        Compute visual features/pos embeddings at different scales.
-
+        """编码多视角RGB-D输入
+        
+        论文3.2节:
+        1. 使用预训练CLIP ResNet50提取2D特征
+        2. 使用深度信息将特征投影到3D空间
+        3. 构建特征金字塔以支持多尺度处理
+        
         Args:
-            - rgb: (B, ncam, 3, H, W), pixel intensities
-            - pcd: (B, ncam, 3, H, W), positions
-
+            rgb: (B,ncam,3,H,W) RGB图像
+            pcd: (B,ncam,3,H,W) 点云坐标
         Returns:
-            - rgb_feats_pyramid: [(B, ncam, F, H_i, W_i)]
-            - pcd_pyramid: [(B, ncam * H_i * W_i, 3)]
+            rgb_feats_pyramid: 多尺度视觉特征
+            pcd_pyramid: 多尺度3D坐标
         """
         num_cameras = rgb.shape[1]
 
@@ -236,6 +258,20 @@ class Encoder(nn.Module):
         return instr_feats, instr_dummy_pos
 
     def run_fps(self, context_features, context_pos):
+        """使用FPS对场景特征进行采样
+        
+        论文3.2节:
+        使用FPS减少token数量以提高计算效率,
+        同时保持场景的空间覆盖
+        
+        Args:
+            context_features: (N,B,F) 原始特征
+            context_pos: (B,N,F,2) 位置编码
+            
+        Returns:
+            sampled_context_features: 采样后的特征
+            sampled_context_pos: 采样后的位置编码
+        """
         # context_features (Np, B, F)
         # context_pos (B, Np, F, 2)
         # outputs of analogous shape, with smaller Np

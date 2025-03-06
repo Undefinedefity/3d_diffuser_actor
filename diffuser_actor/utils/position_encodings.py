@@ -56,16 +56,26 @@ class RotaryPositionEncoding(nn.Module):
 
 
 class RotaryPositionEncoding3D(RotaryPositionEncoding):
+    """3D旋转位置编码
+    
+    论文3.2节:
+    使用旋转位置编码(RoPE)来实现3D相对位置注意力,
+    这有助于实现平移等变性并提高泛化能力。
+    
+    实现了三个维度(x,y,z)的独立旋转编码。
+    """
 
     def __init__(self, feature_dim, pe_type='Rotary3D'):
         super().__init__(feature_dim, pe_type)
 
     @torch.no_grad()
     def forward(self, XYZ):
-        '''
-        @param XYZ: [B,N,3]
-        @return:
-        '''
+        """
+        Args:
+            XYZ: [B,N,3] 3D坐标
+        Returns:
+            position_code: 旋转位置编码,用于注意力计算
+        """
         bsize, npoint, _ = XYZ.shape
         x_position, y_position, z_position = XYZ[..., 0:1], XYZ[..., 1:2], XYZ[..., 2:3]
         div_term = torch.exp(

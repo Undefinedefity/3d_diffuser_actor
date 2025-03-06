@@ -321,6 +321,18 @@ class FeedforwardLayer(nn.Module):
 
 
 class RelativeCrossAttentionLayer(nn.Module):
+    """相对位置交叉注意力层
+    
+    论文3.2节:
+    实现了基于旋转位置编码的相对位置注意力,
+    用于不同模态特征之间的交互
+    
+    Args:
+        embedding_dim: 特征维度
+        num_heads: 注意力头数
+        dropout: Dropout比例
+        use_adaln: 是否使用自适应层归一化
+    """
 
     def __init__(self, embedding_dim, num_heads, dropout=0.0, use_adaln=False):
         super().__init__()
@@ -332,8 +344,20 @@ class RelativeCrossAttentionLayer(nn.Module):
         if use_adaln:
             self.adaln = AdaLN(embedding_dim)
 
-    def forward(self, query, value, diff_ts=None,
+    def forward(self, query, value, diff_ts=None, 
                 query_pos=None, value_pos=None, pad_mask=None):
+        """前向传播
+        
+        Args:
+            query: (L,B,D) 查询特征
+            value: (S,B,D) 键值特征
+            diff_ts: (B,D) 扩散时间步特征
+            query_pos/value_pos: 位置编码
+            pad_mask: 填充掩码
+            
+        Returns:
+            output: 注意力输出
+        """
         if diff_ts is not None:
             adaln_query = self.adaln(query, diff_ts)
         else:
@@ -379,6 +403,16 @@ class SelfAttentionLayer(nn.Module):
 
 
 class FFWRelativeCrossAttentionModule(nn.Module):
+    """相对位置交叉注意力模块
+    
+    论文3.2节:
+    使用相对位置注意力来融合不同模态的信息:
+    1. 视觉tokens之间
+    2. 视觉tokens和语言tokens之间
+    3. 视觉tokens和机器人状态之间
+    
+    这种设计有助于在3D空间中建立长程依赖。
+    """
 
     def __init__(self, embedding_dim, num_attn_heads, num_layers,
                  use_adaln=True):

@@ -25,26 +25,57 @@ from diffuser_actor.utils.utils import (
 
 
 class DiffuserActor(nn.Module):
+    """3D Diffuser Actor的主要模型类
+    
+    论文中的核心创新点:
+    1. 将3D场景表示与扩散策略相结合,在同一个3D空间中处理视觉场景tokens和机器人动作
+    2. 使用相对位置3D注意力机制来实现平移等变性
+    3. 分别对位置和旋转使用不同的噪声调度器
+    
+    主要组件:
+    - 3D场景编码器: 将多视角RGB-D输入编码为3D特征
+    - 语言编码器: 编码任务指令
+    - 扩散头: 预测噪声残差用于迭代去噪
+    """
 
     def __init__(self,
-                 backbone="clip",
-                 image_size=(256, 256),
-                 embedding_dim=60,
-                 num_vis_ins_attn_layers=2,
-                 use_instruction=False,
-                 fps_subsampling_factor=5,
-                 gripper_loc_bounds=None,
-                 rotation_parametrization='6D',
-                 quaternion_format='xyzw',
-                 diffusion_timesteps=100,
-                 nhist=3,
-                 relative=False,
-                 lang_enhanced=False):
+                 backbone="clip",  # 使用CLIP ResNet50作为视觉骨干网络
+                 image_size=(256, 256),  # 输入图像尺寸
+                 embedding_dim=60,  # token特征维度
+                 num_vis_ins_attn_layers=2,  # 视觉-语言注意力层数
+                 use_instruction=False,  # 是否使用语言指令
+                 fps_subsampling_factor=5,  # FPS采样率,用于减少计算量
+                 gripper_loc_bounds=None,  # 夹持器工作空间边界
+                 rotation_parametrization='6D',  # 旋转表示方式,'6D'或四元数
+                 quaternion_format='xyzw',  # 四元数格式
+                 diffusion_timesteps=100,  # 扩散时间步数
+                 nhist=3,  # 机器人历史状态数量
+                 relative=False,  # 是否使用相对坐标系
+                 lang_enhanced=False):  # 是否使用增强的语言条件
+        """初始化3D Diffuser Actor模型
+        
+        Args:
+            backbone: 视觉骨干网络,使用CLIP ResNet50
+            embedding_dim: token特征维度
+            num_vis_ins_attn_layers: 视觉-语言注意力层数
+            use_instruction: 是否使用语言指令
+            fps_subsampling_factor: FPS采样率,用于减少计算量
+            gripper_loc_bounds: 夹持器工作空间边界
+            rotation_parametrization: 旋转表示方式,'6D'或四元数
+            diffusion_timesteps: 扩散时间步数
+            relative: 是否使用相对坐标系
+            lang_enhanced: 是否使用增强的语言条件
+        """
         super().__init__()
+        
+        # 初始化模型配置
         self._rotation_parametrization = rotation_parametrization
         self._quaternion_format = quaternion_format
         self._relative = relative
         self.use_instruction = use_instruction
+
+        # 论文3.2节:3D场景编码器
+        # 将多视角RGB-D编码为3D特征,使用FPS采样减少token数量
         self.encoder = Encoder(
             backbone=backbone,
             image_size=image_size,
@@ -54,6 +85,9 @@ class DiffuserActor(nn.Module):
             num_vis_ins_attn_layers=num_vis_ins_attn_layers,
             fps_subsampling_factor=fps_subsampling_factor
         )
+
+        # 论文3.3节:扩散预测头
+        # 预测位置和旋转的噪声残差
         self.prediction_head = DiffusionHead(
             embedding_dim=embedding_dim,
             use_instruction=use_instruction,
@@ -61,63 +95,103 @@ class DiffuserActor(nn.Module):
             nhist=nhist,
             lang_enhanced=lang_enhanced
         )
+
+        # 论文3.3节:分别使用不同的噪声调度器
+        # 位置使用scaled_linear调度器
         self.position_noise_scheduler = DDPMScheduler(
             num_train_timesteps=diffusion_timesteps,
             beta_schedule="scaled_linear",
             prediction_type="epsilon"
         )
+        # 旋转使用squaredcos调度器,有助于更好地处理旋转的周期性
         self.rotation_noise_scheduler = DDPMScheduler(
             num_train_timesteps=diffusion_timesteps,
-            beta_schedule="squaredcos_cap_v2",
+            beta_schedule="squaredcos_cap_v2", 
             prediction_type="epsilon"
         )
+
         self.n_steps = diffusion_timesteps
         self.gripper_loc_bounds = torch.tensor(gripper_loc_bounds)
 
-    def encode_inputs(self, visible_rgb, visible_pcd, instruction,
-                      curr_gripper):
-        # Compute visual features/positional embeddings at different scales
+    def encode_inputs(self, visible_rgb, visible_pcd, instruction, curr_gripper):
+        """编码模型的输入
+        
+        论文3.2节描述的编码过程:
+        1. 使用Encoder将多视角RGB-D编码为3D特征
+        2. 使用语言编码器处理指令
+        3. 使用视觉-语言注意力融合两种模态
+        4. 编码机器人历史状态
+        
+        Args:
+            visible_rgb: (B,ncam,3,H,W) RGB图像
+            visible_pcd: (B,ncam,3,H,W) 点云坐标
+            instruction: (B,L,512) 语言指令CLIP特征
+            curr_gripper: (B,nhist,7) 机器人历史状态
+            
+        Returns:
+            context_feats: 视觉特征
+            context: 3D坐标
+            instr_feats: 语言特征
+            adaln_gripper_feats: 机器人状态特征
+            fps_feats, fps_pos: FPS采样后的特征
+        """
+        # 编码多视角RGB-D输入
         rgb_feats_pyramid, pcd_pyramid = self.encoder.encode_images(
             visible_rgb, visible_pcd
         )
-        # Keep only low-res scale
+        
+        # 只保留低分辨率特征
         context_feats = einops.rearrange(
             rgb_feats_pyramid[0],
             "b ncam c h w -> b (ncam h w) c"
         )
         context = pcd_pyramid[0]
 
-        # Encode instruction (B, 53, F)
+        # 编码语言指令
         instr_feats = None
         if self.use_instruction:
             instr_feats, _ = self.encoder.encode_instruction(instruction)
 
-        # Cross-attention vision to language
+        # 视觉特征对语言特征的注意力
         if self.use_instruction:
-            # Attention from vision to language
             context_feats = self.encoder.vision_language_attention(
                 context_feats, instr_feats
             )
 
-        # Encode gripper history (B, nhist, F)
+        # 编码机器人历史状态
         adaln_gripper_feats, _ = self.encoder.encode_curr_gripper(
             curr_gripper, context_feats, context
         )
 
-        # FPS on visual features (N, B, F) and (B, N, F, 2)
+        # 使用FPS对视觉特征进行采样以减少计算量
         fps_feats, fps_pos = self.encoder.run_fps(
             context_feats.transpose(0, 1),
             self.encoder.relative_pe_layer(context)
         )
+
         return (
-            context_feats, context,  # contextualized visual features
-            instr_feats,  # language features
-            adaln_gripper_feats,  # gripper history features
-            fps_feats, fps_pos  # sampled visual features
+            context_feats, context,  # 场景特征
+            instr_feats,  # 语言特征
+            adaln_gripper_feats,  # 机器人状态特征
+            fps_feats, fps_pos  # 采样后的特征
         )
 
     def policy_forward_pass(self, trajectory, timestep, fixed_inputs):
-        # Parse inputs
+        """扩散策略的前向传播
+        
+        论文3.3节描述的去噪过程:
+        1. 将噪声轨迹、时间步和编码特征输入预测头
+        2. 预测位置和旋转的噪声
+        
+        Args:
+            trajectory: (B,T,9) 噪声轨迹
+            timestep: (B,) 扩散时间步
+            fixed_inputs: 编码后的特征元组
+            
+        Returns:
+            噪声预测结果
+        """
+        # 解析输入
         (
             context_feats,
             context,
@@ -127,6 +201,7 @@ class DiffuserActor(nn.Module):
             fps_pos
         ) = fixed_inputs
 
+        # 使用预测头预测噪声
         return self.prediction_head(
             trajectory,
             timestep,
@@ -139,19 +214,38 @@ class DiffuserActor(nn.Module):
         )
 
     def conditional_sample(self, condition_data, condition_mask, fixed_inputs):
+        """条件采样生成轨迹
+        
+        论文3.3节描述的采样过程:
+        1. 从标准正态分布采样初始轨迹
+        2. 迭代应用去噪步骤
+        3. 分别对位置和旋转使用不同的噪声调度器
+        
+        Args:
+            condition_data: (B,T,9) 条件轨迹数据
+            condition_mask: (B,T) 条件掩码
+            fixed_inputs: 编码特征
+            
+        Returns:
+            生成的轨迹
+        """
+        # 设置噪声调度器时间步
         self.position_noise_scheduler.set_timesteps(self.n_steps)
         self.rotation_noise_scheduler.set_timesteps(self.n_steps)
 
-        # Random trajectory, conditioned on start-end
+        # 从标准正态分布采样初始轨迹
         noise = torch.randn(
             size=condition_data.shape,
             dtype=condition_data.dtype,
             device=condition_data.device
         )
-        # Noisy condition data
+        
+        # 对条件数据添加噪声
         noise_t = torch.ones(
             (len(condition_data),), device=condition_data.device
         ).long().mul(self.position_noise_scheduler.timesteps[0])
+        
+        # 分别对位置和旋转添加噪声
         noise_pos = self.position_noise_scheduler.add_noise(
             condition_data[..., :3], noise[..., :3], noise_t
         )
@@ -159,19 +253,24 @@ class DiffuserActor(nn.Module):
             condition_data[..., 3:9], noise[..., 3:9], noise_t
         )
         noisy_condition_data = torch.cat((noise_pos, noise_rot), -1)
+        
+        # 应用条件掩码
         trajectory = torch.where(
             condition_mask, noisy_condition_data, noise
         )
 
-        # Iterative denoising
+        # 迭代去噪过程
         timesteps = self.position_noise_scheduler.timesteps
         for t in timesteps:
+            # 预测噪声
             out = self.policy_forward_pass(
                 trajectory,
                 t * torch.ones(len(trajectory)).to(trajectory.device).long(),
                 fixed_inputs
             )
-            out = out[-1]  # keep only last layer's output
+            out = out[-1]  # 只保留最后一层的输出
+            
+            # 分别对位置和旋转进行去噪
             pos = self.position_noise_scheduler.step(
                 out[..., :3], t, trajectory[..., :3]
             ).prev_sample
@@ -180,6 +279,7 @@ class DiffuserActor(nn.Module):
             ).prev_sample
             trajectory = torch.cat((pos, rot), -1)
 
+        # 添加夹持器状态预测
         trajectory = torch.cat((trajectory, out[..., 9:]), -1)
 
         return trajectory
